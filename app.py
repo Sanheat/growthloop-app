@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import time
 
-st.set_page_config(layout="wide", page_title="GrowthLoop Engine")
+st.set_page_config(layout="wide", page_title="GrowthLoop Engine - Full Data")
 
 API_KEY = "4ag8CvRHFhXpwzOz"
 BASE_URL = "https://api.ofdata.ru/v2"
@@ -31,10 +31,7 @@ if st.sidebar.button("Найти компании"):
             if "data" in res_data and "Записи" in res_data["data"]:
                 found_list = res_data["data"]["Записи"]
                 df = pd.DataFrame(found_list)
-                
-                # ДОБАВЛЯЕМ КОЛОНКУ ДЛЯ ВЫБОРА
                 df.insert(0, "Выбрать", False) 
-                
                 df = df.rename(columns={"НаимСокр": "Название", "ИНН": "ИНН", "ЮрАдрес": "Адрес"})
                 st.session_state['found_companies'] = df
             else:
@@ -42,59 +39,60 @@ if st.sidebar.button("Найти компании"):
         except Exception as e:
             st.error(f"Ошибка: {e}")
 
-# ИНТЕРФЕЙС ВЫБОРА
 if 'found_companies' in st.session_state:
-    st.subheader("📋 Шаг 1: Выберите компании для обогащения")
+    st.subheader("📋 Шаг 1: Выберите компании")
     
-    # Используем data_editor, чтобы пользователь мог ставить галочки
     edited_df = st.data_editor(
         st.session_state['found_companies'],
         column_config={
-            "Выбрать": st.column_config.CheckboxColumn(
-                "Выбрать",
-                help="Отметьте компании для сбора контактов",
-                default=False,
-            )
+            "Выбрать": st.column_config.CheckboxColumn("Выбрать", default=False)
         },
         disabled=["Название", "ИНН", "Адрес", "Статус", "КПП", "ОГРН", "ДатаРег", "РегионКод", "ОКВЭД"],
         hide_index=True,
         use_container_width=True
     )
 
-    # Фильтруем: только те, где стоит галочка
     selected_rows = edited_df[edited_df["Выбрать"] == True]
-    
-    st.write(f"✅ Выбрано компаний: **{len(selected_rows)}**")
+    st.write(f"✅ Выбрано для полного обогащения: **{len(selected_rows)}**")
 
-    if st.button("🚀 Обогатить выбранные"):
+    if st.button("🚀 Собрать ВСЕ данные по выбранным"):
         if len(selected_rows) == 0:
-            st.warning("Сначала выберите хотя бы одну компанию (поставьте галочку)")
+            st.warning("Выберите хотя бы одну компанию")
         else:
-            enriched = []
+            all_raw_data = []
             progress = st.progress(0)
             inns = selected_rows['ИНН'].tolist()
             
             for i, inn in enumerate(inns):
                 try:
+                    # Запрашиваем полные данные
                     res = requests.get(f"{BASE_URL}/company", params={"key": API_KEY, "inn": inn}).json()
                     if "data" in res:
-                        c = res["data"]
-                        manager = c.get("Руковод", [{}])[0].get("ФИО", "Не указан")
-                        enriched.append({
-                            "Компания": c.get("НаимПолн"),
-                            "ИНН": c.get("ИНН"),
-                            "Директор": manager,
-                            "Сотрудники": c.get("СЧР", "Н/Д"),
-                            "Выручка": c.get("Налоги", {}).get("СумУпл", "Н/Д"),
-                            "Телефон": c.get("Контакты", {}).get("Тел", ["-"])[0],
-                            "Email": c.get("Контакты", {}).get("Емэйл", ["-"])[0]
-                        })
+                        # Сохраняем весь объект целиком
+                        all_raw_data.append(res["data"])
                 except:
                     continue
+                
                 progress.progress((i + 1) / len(inns))
                 time.sleep(0.1)
 
-            final_df = pd.DataFrame(enriched)
-            st.subheader("💎 Результат обогащения")
-            st.dataframe(final_df, use_container_width=True)
-            st.download_button("📥 Скачать CSV", final_df.to_csv(index=False).encode('utf-8-sig'), "selected_leads.csv")
+            if all_raw_data:
+                # МАГИЯ: превращаем вложенный JSON в плоскую таблицу
+                # Каждое поле станет колонкой (например: Контакты.ВебСайт, Налоги.СумУпл и т.д.)
+                final_df = pd.json_normalize(all_raw_data)
+                
+                st.subheader("💎 Полная база данных (Все поля API)")
+                
+                # Показываем таблицу (в ней будет ОЧЕНЬ много колонок)
+                st.dataframe(final_df, use_container_width=True)
+                
+                # Экспорт
+                csv = final_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    label="📥 Скачать полный отчет (CSV)",
+                    data=csv,
+                    file_name="full_enriched_data.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.error("Не удалось получить данные")
