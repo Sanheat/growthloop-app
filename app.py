@@ -3,106 +3,89 @@ import pandas as pd
 import requests
 import time
 
-st.set_page_config(layout="wide", page_title="GrowthLoop Hybrid Pro v2.5")
+st.set_page_config(layout="wide", page_title="GrowthLoop Hybrid v2.7")
 
-# Ключи
+# Ключи (проверьте, что они верные)
 FNS_API_KEY = "8f1364cd9916da3ba62170204442a80566bc5f29"
 OFDATA_API_KEY = "4ag8CvRHFhXpwzOz"
 
 def clean_val(val):
-    if isinstance(val, list):
+    """Очищает данные от технических символов и красиво склеивает списки."""
+    if isinstance(val, (list, dict)):
         if not val: return ""
-        if isinstance(val[0], str): return ", ".join(val)
-        if isinstance(val[0], dict):
-            return "; ".join([" | ".join([f"{k}: {v}" for k, v in i.items() if v]) for i in val])
+        if isinstance(val, list) and isinstance(val[0], dict):
+            return " | ".join([f"{v}" for d in val for k, v in d.items() if v])
+        return str(val)
     return val
 
-# --- САЙДБАР ---
 st.sidebar.title("🚀 Гибридный поиск")
-okved = st.sidebar.text_input("ОКВЭД (группа или код)", "62.01")
+okved = st.sidebar.text_input("ОКВЭД (группа)", "62")
 region = st.sidebar.text_input("Регион (код)", "77")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📊 Финансовые фильтры")
-rev_min = st.sidebar.number_input("Выручка от (млн руб.)", 0)
-rev_max = st.sidebar.number_input("Выручка до (млн руб.)", 0)
+st.sidebar.subheader("📊 Финансы (млн руб.)")
+rev_min = st.sidebar.number_input("Выручка от", 10)
 staff_min = st.sidebar.number_input("Сотрудников от", 0)
 
+# --- ШАГ 1: ПОИСК ---
 if st.sidebar.button("Найти цели"):
-    # 1. Формируем фильтр строго по документации
-    filter_parts = ["active", "onlyul"]
-    if okved: filter_parts.append(f"okvedgroup{okved}")
-    if region: filter_parts.append(f"region{region}")
+    # Формируем фильтры для API-FNS
+    f = f"active+onlyul+okvedgroup{okved}+region{region}+vyruchka>{rev_min*1000}"
+    if staff_min > 0: f += f"+sotrudnikov>{staff_min}"
     
-    if rev_min > 0 or rev_max > 0:
-        v_str = "vyruchka"
-        if rev_min > 0: v_str += f">{rev_min * 1000}" # в тыс. руб.
-        if rev_max > 0: v_str += f"<{rev_max * 1000}"
-        filter_parts.append(v_str)
-        
-    if staff_min > 0:
-        filter_parts.append(f"sotrudnikov>{staff_min}")
+    url = f"https://api-fns.ru/api/search?q=any&filter={f}&key={FNS_API_KEY}"
 
-    filter_final = "+".join(filter_parts)
-    
-    # 2. Ручное формирование URL (защита от перекодирования символов requests-ом)
-    # Это критически важно для API-FNS
-    search_url = f"https://api-fns.ru/api/search?q=any&filter={filter_final}&key={FNS_API_KEY}"
-
-    with st.spinner('Запрос к ФНС API...'):
+    with st.spinner('Синхронизация с ФНС...'):
         try:
-            r = requests.get(search_url)
-            
-            # Если сервер вернул не 200 OK
-            if r.status_code != 200:
-                st.error(f"Сервер вернул ошибку {r.status_code}. Текст: {r.text}")
-            else:
-                try:
-                    res_data = r.json()
-                    if "items" in res_data and res_data["items"]:
-                        df = pd.DataFrame(res_data["items"])
-                        df.insert(0, "Выбрать", False)
-                        rename_map = {"НаимСокрЮЛ": "Название", "ИНН": "ИНН", "АдресПолн": "Адрес"}
-                        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-                        st.session_state['search_results'] = df
-                    else:
-                        st.warning("Компании не найдены. Попробуйте уменьшить фильтры (например, выручку).")
-                        # Показываем сырой ответ для диагностики, если пусто
-                        with st.expander("Технический ответ сервера"):
-                            st.write(res_data)
-                except Exception as json_err:
-                    st.error("Ошибка чтения данных. Похоже, API прислал не таблицу, а текст.")
-                    with st.expander("Посмотреть, что прислал сервер"):
-                        st.code(r.text)
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                items = data.get("items", [])
+                if items:
+                    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Разворачиваем вложенные объекты в плоскую таблицу
+                    df = pd.json_normalize(items)
+                    
+                    # Чистим названия колонок (убираем префиксы типа 'ЮЛ.', 'ИП.')
+                    df.columns = [c.split('.')[-1] for c in df.columns]
+                    
+                    # Добавляем колонку для выбора
+                    df.insert(0, "Выбрать", False)
+                    
+                    # Сохраняем в сессию
+                    st.session_state['results'] = df
+                else:
+                    st.warning("Компании не найдены. Попробуйте уменьшить фильтр выручки.")
+            elif r.status_code == 403:
+                st.error(f"🚫 Ошибка 403. Проверьте IP {r.text} в ЛК api-fns.ru")
         except Exception as e:
-            st.error(f"Ошибка соединения: {e}")
+            st.error(f"Ошибка: {e}")
 
-# --- ВТОРОЙ ШАГ: OFDATA ---
-if 'search_results' in st.session_state:
-    st.subheader("📋 Найденные компании")
-    res_df = st.session_state['search_results']
+# --- ШАГ 2: ОТОБРАЖЕНИЕ И ВЫБОР ---
+if 'results' in st.session_state:
+    st.subheader("📋 Найденные компании (выберите нужные)")
     
+    # Отображаем таблицу. Streamlit сам добавит прокрутку, если колонок много.
     edited_df = st.data_editor(
-        res_df,
-        column_config={"Выбрать": st.column_config.CheckboxColumn("Выбрать")},
-        disabled=[c for c in res_df.columns if c != "Выбрать"],
-        hide_index=True, use_container_width=True
+        st.session_state['results'],
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Выбрать": st.column_config.CheckboxColumn("Выбрать", default=False)}
     )
 
     selected = edited_df[edited_df["Выбрать"] == True]
     
+    # --- ШАГ 3: ОБОГАЩЕНИЕ ЧЕРЕЗ OFDATA ---
     if st.button(f"🚀 Обогатить контактами ({len(selected)})"):
         if selected.empty:
-            st.info("Отметьте нужные компании в таблице выше.")
+            st.warning("Сначала отметьте галочками компании в таблице!")
         else:
             enriched = []
             bar = st.progress(0)
+            # Теперь 'ИНН' точно найдется, так как мы развернули таблицу
             inns = selected['ИНН'].tolist()
             
             for i, inn in enumerate(inns):
                 try:
-                    res = requests.get(f"https://api.ofdata.ru/v2/company", 
-                                     params={"key": OFDATA_API_KEY, "inn": inn}).json()
+                    res = requests.get(f"https://api.ofdata.ru/v2/company?key={OFDATA_API_KEY}&inn={inn}").json()
                     if "data" in res:
                         enriched.append(res["data"])
                     time.sleep(0.1)
@@ -111,8 +94,10 @@ if 'search_results' in st.session_state:
             
             if enriched:
                 final_df = pd.json_normalize(enriched)
+                # Чистим результат Ofdata от [object Object]
                 for col in final_df.columns:
                     final_df[col] = final_df[col].apply(clean_val)
-                st.subheader("💎 Результат с контактами")
+                
+                st.subheader("💎 Финальный результат")
                 st.dataframe(final_df, use_container_width=True)
-                st.download_button("📥 Скачать CSV", final_df.to_csv(index=False).encode('utf-8-sig'), "leads.csv")
+                st.download_button("📥 Скачать базу", final_df.to_csv(index=False).encode('utf-8-sig'), "leads.csv")
