@@ -4,13 +4,13 @@ import requests
 import time
 
 # --- НАСТРОЙКИ СТРАНИЦЫ ---
-st.set_page_config(layout="wide", page_title="GrowthLoop Hybrid Pro v3.1")
+st.set_page_config(layout="wide", page_title="GrowthLoop Hybrid Pro v3.2")
 
 # --- КЛЮЧИ API ---
 FNS_API_KEY = "8f1364cd9916da3ba62170204442a80566bc5f29"
 OFDATA_API_KEY = "4ag8CvRHFhXpwzOz"
 
-# --- ПОЛНЫЙ СПРАВОЧНИК РЕГИОНОВ ---
+# --- СПРАВОЧНИК РЕГИОНОВ (Полный) ---
 REGIONS = {
     "Все регионы": "", "01 - Адыгея": "01", "02 - Башкортостан": "02", "03 - Бурятия": "03", "04 - Алтай": "04",
     "05 - Дагестан": "05", "06 - Ингушетия": "06", "07 - Кабардино-Балкария": "07", "08 - Калмыкия": "08",
@@ -43,14 +43,12 @@ REGIONS = {
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def clean_val(val):
-    """Умная очистка: убирает пустые двоеточия и красиво форматирует списки."""
     if not val: return ""
     if isinstance(val, list):
         if not val: return ""
         if isinstance(val[0], dict):
             items = []
             for i in val:
-                # Извлекаем осмысленные данные (Имя/Название или Сумму/Долю)
                 name = i.get('ФИО') or i.get('НаимСокрЮЛ') or i.get('НаимНалог') or i.get('Наименование')
                 value = i.get('СумУплНал') or i.get('Сумма') or i.get('ДоляПроцент')
                 if name and value: items.append(f"{name}: {value}")
@@ -64,7 +62,6 @@ def clean_val(val):
     return str(val)
 
 def process_contacts(df, col_name, prefix):
-    """Разносит контакты по отдельным столбцам без скобок и кавычек."""
     if col_name not in df.columns: return df
     contacts_series = df[col_name].apply(lambda x: x if isinstance(x, list) else [])
     max_len = contacts_series.map(len).max()
@@ -76,24 +73,19 @@ def process_contacts(df, col_name, prefix):
 # --- БОКОВАЯ ПАНЕЛЬ ---
 st.sidebar.title("🎯 Фильтры поиска")
 
-# Блок ОКВЭД (Текстовое поле)
 okved_input = st.sidebar.text_input("ОКВЭДы (через | )", placeholder="62 или 62.01|62.02")
-st.sidebar.caption("Пример: 62 (группа) или 62.01|62.02 (конкретные)")
 
-# Блок Регион (Выпадающий список)
 sel_region_name = st.sidebar.selectbox("Регион", list(REGIONS.keys()))
 region_code = REGIONS[sel_region_name]
 
 st.sidebar.markdown("---")
 
-# Финансы (в две колонки)
 with st.sidebar.expander("💰 Выручка (млн руб.)", expanded=True):
     r_col1, r_col2 = st.columns(2)
     with r_col1:
         rev_min = st.number_input("От", value=0, key="rev_min", label_visibility="collapsed")
     with r_col2:
         rev_max = st.number_input("До", value=0, key="rev_max", label_visibility="collapsed")
-    st.caption("Минимальная и максимальная выручка")
 
 with st.sidebar.expander("👥 Параметры"):
     staff_min = st.number_input("Сотрудников от", value=0)
@@ -105,22 +97,15 @@ with st.sidebar.expander("👥 Параметры"):
 if st.sidebar.button("Найти компании", use_container_width=True):
     f_parts = ["onlyul"]
     if active_only: f_parts.append("active")
-    
-    # Обработка ОКВЭД (группа или список)
     if okved_input:
-        if "|" in okved_input or "." in okved_input:
-            f_parts.append(f"okved{okved_input}")
-        else:
-            f_parts.append(f"okvedgroup{okved_input}")
-            
+        if "|" in okved_input or "." in okved_input: f_parts.append(f"okved{okved_input}")
+        else: f_parts.append(f"okvedgroup{okved_input}")
     if region_code: f_parts.append(f"region{region_code}")
-    
     if rev_min > 0 or rev_max > 0:
         v_str = "vyruchka"
         if rev_min > 0: v_str += f">{rev_min * 1000}"
         if rev_max > 0: v_str += f"<{rev_max * 1000}"
         f_parts.append(v_str)
-        
     if staff_min > 0: f_parts.append(f"sotrudnikov>{staff_min}")
     if with_phone: f_parts.append("withphone")
     if with_email: f_parts.append("withemail")
@@ -128,7 +113,7 @@ if st.sidebar.button("Найти компании", use_container_width=True):
     filter_final = "+".join(f_parts)
     search_url = f"https://api-fns.ru/api/search?q=any&filter={filter_final}&key={FNS_API_KEY}"
 
-    with st.spinner('Синхронизация с ФНС...'):
+    with st.spinner('Поиск в реестре ФНС...'):
         try:
             r = requests.get(search_url, timeout=20)
             if r.status_code == 200:
@@ -138,44 +123,70 @@ if st.sidebar.button("Найти компании", use_container_width=True):
                     df.columns = [c.split('.')[-1] for c in df.columns]
                     df.insert(0, "Выбрать", False)
                     st.session_state['results'] = df
+                    st.session_state['search_count'] = len(df) # Сохраняем счетчик
                 else:
-                    st.warning("Ничего не найдено.")
+                    st.session_state['results'] = None
+                    st.session_state['search_count'] = 0
+                    st.warning("По таким критериям компаний не найдено.")
             elif r.status_code == 403:
-                st.error(f"Добавьте IP {r.text} в белый список API.")
+                st.error(f"Ошибка 403: Добавьте IP {r.text} в ЛК API.")
         except Exception as e:
-            st.error(f"Ошибка: {e}")
+            st.error(f"Сбой: {e}")
 
 # --- ВЫВОД РЕЗУЛЬТАТОВ ---
-if 'results' in st.session_state:
-    st.subheader("📋 Найденные компании")
-    edited_df = st.data_editor(st.session_state['results'], use_container_width=True, hide_index=True)
+if 'results' in st.session_state and st.session_state['results'] is not None:
+    
+    # 1. Показываем счетчик
+    st.metric("Найдено подходящих компаний", st.session_state['search_count'])
+    
+    # 2. Массовый выбор
+    col_sel1, col_sel2 = st.columns([1, 4])
+    with col_sel1:
+        select_all = st.checkbox("Выбрать все", key="select_all_cb")
+    
+    if select_all:
+        st.session_state['results']['Выбрать'] = True
+    else:
+        # Если чекбокс снят, но в таблице что-то выбрано вручную - не сбрасываем всё сразу,
+        # чтобы дать пользователю возможность гибкого выбора.
+        pass
+
+    # 3. Редактор таблицы
+    edited_df = st.data_editor(
+        st.session_state['results'], 
+        use_container_width=True, 
+        hide_index=True,
+        column_config={"Выбрать": st.column_config.CheckboxColumn("Выбрать")}
+    )
+
     selected = edited_df[edited_df["Выбрать"] == True]
     
-    if st.button(f"🚀 Собрать данные для ({len(selected)})"):
+    # --- ОБОГАЩЕНИЕ ---
+    if st.button(f"🚀 Собрать контакты и налоги для ({len(selected)})", use_container_width=True):
         if selected.empty:
-            st.warning("Выберите компании!")
+            st.warning("Сначала выберите компании в списке выше.")
         else:
             enriched = []
-            bar = st.progress(0)
+            progress_bar = st.progress(0)
             inns = selected['ИНН'].tolist()
+            
             for i, inn in enumerate(inns):
                 try:
                     res = requests.get(f"https://api.ofdata.ru/v2/company?key={OFDATA_API_KEY}&inn={inn}").json()
                     if "data" in res: enriched.append(res["data"])
                     time.sleep(0.15)
                 except: pass
-                bar.progress((i + 1) / len(inns))
+                progress_bar.progress((i + 1) / len(inns))
             
             if enriched:
                 final_df = pd.json_normalize(enriched)
                 final_df = process_contacts(final_df, 'Контакты.Тел', 'Телефон')
                 final_df = process_contacts(final_df, 'Контакты.Емэйл', 'Email')
                 
-                # Финальная чистка всех колонок
                 for col in final_df.columns:
                     final_df[col] = final_df[col].apply(clean_val)
                 
                 final_df.columns = [c.replace('.', ' ') for c in final_df.columns]
-                st.subheader("💎 Результат")
+                st.subheader("💎 Финальная база")
                 st.dataframe(final_df, use_container_width=True)
-                st.download_button("📥 Скачать CSV", final_df.to_csv(index=False).encode('utf-8-sig'), "leads.csv")
+                st.download_button("📥 Скачать CSV", final_df.to_csv(index=False).encode('utf-8-sig'), "leads_final.csv")
